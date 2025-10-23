@@ -37,7 +37,7 @@
 
   <!-- Video and Canvas Elements for Real-Time Detection -->
   <video id="webcam" autoplay loop muted playsinline controls>
-    <source src="./videos/hand2.mp4" type="video/mp4">
+    <source src="./videos/hand3.mp4" type="video/mp4">
     Tu navegador no soporta el elemento video.
   </video>
   <canvas id="output_canvas"></canvas>
@@ -191,7 +191,7 @@
       const thumbIndexAngle = calculateAngleBetweenPoints(thumbTip, indexTip, wrist);
       
       // 4. Check if angle is greater than 45 degrees
-      const angleCondition = thumbIndexAngle > 45;
+      const angleCondition = thumbIndexAngle > 10;
       
       // Calculate pointing direction (from wrist to index tip)
       const direction = {
@@ -234,9 +234,10 @@
     }
 
     // Function to draw arrow starting from fingertip
-    function drawSmallArrow(ctx, x, y, angle, color = "#FF0000", size = 25) {
-      const arrowLength = 40; // Longitud de la flecha
-      const arrowWidth = size * 0.6;
+    function drawSmallArrow(ctx, x, y, angle, color = "#FF0000", size = 60, dynamicFactor = 1.0) {
+      const baseArrowLength = 80; // Aumentado de 40 a 80
+      const arrowLength = baseArrowLength * dynamicFactor; // Longitud dinámica basada en el factor
+      const arrowWidth = size * 0.8 * dynamicFactor; // Ancho dinámico aumentado
       
       ctx.save();
       ctx.translate(x, y);
@@ -245,24 +246,24 @@
       // Dibujar la flecha desde la punta del dedo hacia adelante
       ctx.strokeStyle = color;
       ctx.fillStyle = color;
-      ctx.lineWidth = 3;
+      ctx.lineWidth = 5 * Math.min(dynamicFactor, 2.0); // Grosor aumentado de 3 a 5
       
       ctx.beginPath();
       // Cuerpo de la flecha (desde la punta hacia adelante)
       ctx.moveTo(0, 0);  // Comienza en la punta del dedo
-      ctx.lineTo(arrowLength, 0);  // Se extiende hacia adelante
+      ctx.lineTo(arrowLength, 0);  // Se extiende hacia adelante dinámicamente
       
-      // Cabeza de la flecha al final
+      // Cabeza de la flecha al final (más grande si el factor es mayor)
       ctx.moveTo(arrowLength, 0);
-      ctx.lineTo(arrowLength - arrowWidth/2, -arrowWidth/3);
+      ctx.lineTo(arrowLength - arrowWidth/2, -arrowWidth/2); // Cabeza más grande
       ctx.moveTo(arrowLength, 0);
-      ctx.lineTo(arrowLength - arrowWidth/2, arrowWidth/3);
+      ctx.lineTo(arrowLength - arrowWidth/2, arrowWidth/2); // Cabeza más grande
       
       ctx.stroke();
       
-      // Círculo pequeño en la punta del dedo (punto de origen)
+      // Círculo pequeño en la punta del dedo (punto de origen) - también dinámico
       ctx.beginPath();
-      ctx.arc(0, 0, 4, 0, 2 * Math.PI);
+      ctx.arc(0, 0, 6 * Math.min(dynamicFactor, 1.5), 0, 2 * Math.PI); // Círculo más grande
       ctx.fill();
       
       ctx.restore();
@@ -320,18 +321,29 @@
             
             // Mostrar estado del gesto de apuntar
             if (pointingGesture.isPointing) {
+              const thumbIndexAngle = pointingGesture.debug.thumbIndexAngle;
+              // Usar la misma fórmula que en el dibujo
+              const minAngle = 10;
+              const maxAngle = 150;
+              const minFactor = 1.0; // Actualizado para coincidir
+              const maxFactor = 4.0; // Actualizado para coincidir
+              const normalizedAngle = Math.max(0, Math.min(thumbIndexAngle - minAngle, maxAngle - minAngle));
+              const dynamicFactor = minFactor + (normalizedAngle / (maxAngle - minAngle)) * (maxFactor - minFactor);
+              
               textCtx.fillStyle = "#00FF00";
               textCtx.font = "bold 18px Arial";
               textCtx.fillText("👉 APUNTANDO!", 20, yOffset);
               textCtx.fillStyle = "#FFFF00";
               textCtx.font = "12px Arial";
               textCtx.fillText(`Dirección: ${pointingGesture.angle.toFixed(1)}°`, 20, yOffset + 18);
+              textCtx.fillText(`Ángulo P-I: ${thumbIndexAngle.toFixed(1)}°`, 20, yOffset + 33);
+              textCtx.fillText(`Factor: ${dynamicFactor.toFixed(2)}x (${minFactor}-${maxFactor})`, 20, yOffset + 48);
             } else {
               textCtx.fillStyle = "#888888";
               textCtx.font = "14px Arial";
               textCtx.fillText("No apuntando", 20, yOffset);
             }
-            yOffset += 40;
+            yOffset += 70;
             
             // Mostrar cada ángulo
             textCtx.font = "14px Arial";
@@ -416,14 +428,37 @@
               };
               const angleRadians = Math.atan2(direction.y, direction.x);
               
-              // Dibujar flecha pequeña en la punta del índice
-              drawSmallArrow(canvasCtx, indexPosition.x, indexPosition.y, angleRadians, "#FF0000", 40);
+              // Calcular factor dinámico basado en el ángulo entre pulgar e índice
+              const thumbIndexAngle = pointingGesture.debug.thumbIndexAngle;
+              // Mapear el ángulo directamente a un factor dinámico (más grande)
+              // Ángulo mínimo: 45° (factor = 1.0 - flecha pequeña pero visible)
+              // Ángulo medio: 90° (factor = 2.5 - flecha mediana)  
+              // Ángulo grande: 150° (factor = 4.0 - flecha muy grande)
+              const minAngle = 45;
+              const maxAngle = 150;
+              const minFactor = 1.0; // Aumentado de 0.5 a 1.0
+              const maxFactor = 4.0; // Aumentado de 3.0 a 4.0
               
-              // Agregar un segundo círculo pulsante para mayor visibilidad
-              canvasCtx.strokeStyle = "#FFFF00";
+              // Cálculo lineal directo: a mayor ángulo, mayor factor
+              const normalizedAngle = Math.max(0, Math.min(thumbIndexAngle - minAngle, maxAngle - minAngle));
+              const dynamicFactor = minFactor + (normalizedAngle / (maxAngle - minAngle)) * (maxFactor - minFactor);
+              
+              // Calcular color dinámico basado en el ángulo (más suave)
+              const colorIntensity = normalizedAngle / (maxAngle - minAngle);
+              const red = Math.floor(255 * Math.max(0.3, colorIntensity)); // Mínimo 30% rojo
+              const green = Math.floor(255 * (1 - colorIntensity * 0.7)); // Verde que disminuye suavemente
+              const blue = Math.floor(50 * (1 - colorIntensity)); // Un poco de azul para transición
+              const dynamicColor = `rgb(${red}, ${green}, ${blue})`;
+              
+              // Dibujar flecha dinámica en la punta del índice
+              drawSmallArrow(canvasCtx, indexPosition.x, indexPosition.y, angleRadians, dynamicColor, 80, dynamicFactor);
+              
+              // Agregar un círculo pulsante dinámico para mayor visibilidad
+              const circleRadius = 25 * Math.min(dynamicFactor, 2.0); // Círculo más grande también
+              canvasCtx.strokeStyle = dynamicColor;
               canvasCtx.lineWidth = 4;
               canvasCtx.beginPath();
-              canvasCtx.arc(indexPosition.x, indexPosition.y, 15, 0, 2 * Math.PI);
+              canvasCtx.arc(indexPosition.x, indexPosition.y, circleRadius, 0, 2 * Math.PI);
               canvasCtx.stroke();
             }
           }
