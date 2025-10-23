@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hand Detection</title>
+
+  <!-- Import MediaPipe and Drawing Utilities -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+  <!-- Minimal CSS to center video and canvas -->
+  <style>
+    body { 
+      display: flex; 
+      justify-content: center; 
+      align-items: center; 
+      height: 100vh; 
+      margin: 0; 
+      background-color: #1a1a1a;
+      font-family: Arial, sans-serif;
+    }
+    video, #output_canvas { 
+      position: absolute; 
+      transform: rotateY(180deg); /* Mirror video and canvas */
+    }
+    
+    /* Canvas de texto que no se voltea */
+    #text_canvas {
+      position: absolute;
+      z-index: 10;
+      pointer-events: none; /* No interferir con controles del video */
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Video and Canvas Elements for Real-Time Detection -->
+  <video id="webcam" autoplay loop muted playsinline controls>
+    <source src="./videos/hand2.mp4" type="video/mp4">
+    Tu navegador no soporta el elemento video.
+  </video>
+  <canvas id="output_canvas"></canvas>
+  <canvas id="text_canvas"></canvas>
+
+  <!-- Main JavaScript for Hand Landmark Detection -->
+  <script type="module">
+    import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+
+    let handLandmarker;          // Hand landmark detection instance
+    let runningMode = "VIDEO";    // Set running mode to video for real-time detection
+    let lastVideoTime = -1;       // Track video frame timing
+
+    // Initialize hand landmark detector
+    const initializeHandLandmarker = async () => {
+      const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm");
+      handLandmarker = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+          delegate: "GPU"
+        },
+        runningMode: runningMode,
+        numHands: 1
+      });
+    };
+    initializeHandLandmarker(); // Initialize landmarker
+
+    const video = document.getElementById("webcam");           // Video element
+    const canvas = document.getElementById("output_canvas");   // Canvas for drawing landmarks
+    const canvasCtx = canvas.getContext("2d");
+    const textCanvas = document.getElementById("text_canvas"); // Canvas for text (not mirrored)
+    const textCtx = textCanvas.getContext("2d");
+
+    // Function to calculate angle between thumb and index finger
+    function calculateThumbIndexAngle(landmarks) {
+      // MediaPipe hand landmarks indices:
+      // 4 = Thumb tip (THUMB_TIP)
+      // 8 = Index finger tip (INDEX_FINGER_TIP)
+      // 0 = Wrist (WRIST)
+      
+      const thumbTip = landmarks[4];    // Punta del pulgar
+      const indexTip = landmarks[8];    // Punta del índice
+      const wrist = landmarks[0];       // Muñeca como punto de referencia
+      
+      return calculateAngleBetweenPoints(thumbTip, indexTip, wrist);
+    }
+
+    // Function to calculate angle between any two points using wrist as reference
+    function calculateAngleBetweenPoints(point1, point2, reference) {
+      // Crear vectores desde el punto de referencia hacia cada punto
+      const vector1 = {
+        x: point1.x - reference.x,
+        y: point1.y - reference.y
+      };
+      
+      const vector2 = {
+        x: point2.x - reference.x,
+        y: point2.y - reference.y
+      };
+      
+      // Calcular el producto punto de los vectores
+      const dotProduct = vector1.x * vector2.x + vector1.y * vector2.y;
+      
+      // Calcular las magnitudes de los vectores
+      const magnitude1 = Math.sqrt(vector1.x * vector1.x + vector1.y * vector1.y);
+      const magnitude2 = Math.sqrt(vector2.x * vector2.x + vector2.y * vector2.y);
+      
+      // Calcular el coseno del ángulo
+      const cosAngle = dotProduct / (magnitude1 * magnitude2);
+      
+      // Calcular el ángulo en radianes y convertir a grados
+      const angleRadians = Math.acos(Math.max(-1, Math.min(1, cosAngle))); // Clamp para evitar errores de precisión
+      const angleDegrees = angleRadians * (180 / Math.PI);
+      
+      return angleDegrees;
+    }
+
+    // Function to calculate all finger angles
+    function calculateAllFingerAngles(landmarks) {
+      // Puntas de los dedos en MediaPipe (orden anatómico):
+      // 4: Pulgar (Thumb)
+      // 8: Índice (Index) 
+      // 12: Medio (Middle)
+      // 16: Anular (Ring)
+      // 20: Meñique (Pinky)
+      
+      const fingerTips = {
+        thumb: landmarks[4],
+        index: landmarks[8], 
+        middle: landmarks[12],
+        ring: landmarks[16],
+        pinky: landmarks[20]
+      };
+      
+      const wrist = landmarks[0];
+      const angles = {};
+      
+      // Calcular ángulos solo entre dedos vecinos (adyacentes)
+      const fingerPairs = [
+        { finger1: 'thumb', finger2: 'index', label: 'thumb_index' },
+        { finger1: 'index', finger2: 'middle', label: 'index_middle' },
+        { finger1: 'middle', finger2: 'ring', label: 'middle_ring' },
+        { finger1: 'ring', finger2: 'pinky', label: 'ring_pinky' }
+      ];
+      
+      for (const pair of fingerPairs) {
+        const angle = calculateAngleBetweenPoints(
+          fingerTips[pair.finger1], 
+          fingerTips[pair.finger2], 
+          wrist
+        );
+        angles[pair.label] = angle;
+      }
+      
+      return {
+        angles: angles,
+        fingerTips: fingerTips,
+        wrist: wrist
+      };
+    }
+
+    // Function to detect pointing gesture with index finger
+    function detectPointingGesture(landmarks) {
+      // Landmarks for finger analysis:
+      // Index finger: 5 (MCP), 6 (PIP), 7 (DIP), 8 (TIP)
+      // Thumb: 2 (MCP), 4 (TIP)
+      
+      const wrist = landmarks[0];
+      const indexMCP = landmarks[5];   // Base del índice
+      const indexPIP = landmarks[6];   // Primera articulación
+      const indexDIP = landmarks[7];   // Segunda articulación  
+      const indexTip = landmarks[8];   // Punta del índice
+      const thumbMCP = landmarks[2];
+      const thumbTip = landmarks[4];
+      
+      // 1. Check if index finger is fully extended (all joints in proper sequence)
+      // El dedo está estirado si cada articulación está progresivamente más alejada de la muñeca
+      const joint1Extended = indexPIP.y < indexMCP.y;  // Primera articulación más alta que la base
+      const joint2Extended = indexDIP.y < indexPIP.y;  // Segunda articulación más alta que la primera
+      const tipExtended = indexTip.y < indexDIP.y;     // Punta más alta que la segunda articulación
+      
+      const indexExtended = joint1Extended && joint2Extended && tipExtended;
+      
+      // 2. Check if thumb is extended (tip away from MCP joint)
+      const thumbExtended = Math.sqrt(
+        Math.pow(thumbTip.x - thumbMCP.x, 2) + 
+        Math.pow(thumbTip.y - thumbMCP.y, 2)
+      ) > 0.05; // Minimum distance for thumb extension
+      
+      // 3. Calculate angle between thumb and index finger using wrist as reference
+      const thumbIndexAngle = calculateAngleBetweenPoints(thumbTip, indexTip, wrist);
+      
+      // 4. Check if angle is greater than 45 degrees
+      const angleCondition = thumbIndexAngle > 45;
+      
+      // Calculate pointing direction (from wrist to index tip)
+      const direction = {
+        x: indexTip.x - wrist.x,
+        y: indexTip.y - wrist.y
+      };
+      
+      // Normalize direction vector
+      const magnitude = Math.sqrt(direction.x * direction.x + direction.y * direction.y);
+      const normalizedDirection = {
+        x: direction.x / magnitude,
+        y: direction.y / magnitude
+      };
+      
+      // Calculate angle of pointing direction (in degrees)
+      const pointingAngleRadians = Math.atan2(direction.y, direction.x);
+      const pointingAngleDegrees = pointingAngleRadians * (180 / Math.PI);
+      
+      // All conditions must be met
+      const isPointing = indexExtended && thumbExtended && angleCondition;
+      
+      return {
+        isPointing: isPointing,
+        confidence: isPointing ? 1.0 : 0.0,
+        direction: normalizedDirection,
+        angle: pointingAngleDegrees,
+        indexTip: indexTip,
+        wrist: wrist,
+        // Debug info
+        debug: {
+          indexExtended: indexExtended,
+          joint1Extended: joint1Extended,
+          joint2Extended: joint2Extended,
+          tipExtended: tipExtended,
+          thumbExtended: thumbExtended,
+          thumbIndexAngle: thumbIndexAngle,
+          angleCondition: angleCondition
+        }
+      };
+    }
+
+    // Function to draw arrow starting from fingertip
+    function drawSmallArrow(ctx, x, y, angle, color = "#FF0000", size = 25) {
+      const arrowLength = 40; // Longitud de la flecha
+      const arrowWidth = size * 0.6;
+      
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(angle);
+      
+      // Dibujar la flecha desde la punta del dedo hacia adelante
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 3;
+      
+      ctx.beginPath();
+      // Cuerpo de la flecha (desde la punta hacia adelante)
+      ctx.moveTo(0, 0);  // Comienza en la punta del dedo
+      ctx.lineTo(arrowLength, 0);  // Se extiende hacia adelante
+      
+      // Cabeza de la flecha al final
+      ctx.moveTo(arrowLength, 0);
+      ctx.lineTo(arrowLength - arrowWidth/2, -arrowWidth/3);
+      ctx.moveTo(arrowLength, 0);
+      ctx.lineTo(arrowLength - arrowWidth/2, arrowWidth/3);
+      
+      ctx.stroke();
+      
+      // Círculo pequeño en la punta del dedo (punto de origen)
+      ctx.beginPath();
+      ctx.arc(0, 0, 4, 0, 2 * Math.PI);
+      ctx.fill();
+      
+      ctx.restore();
+    }
+
+    // Setup video file instead of webcam
+    video.addEventListener("loadeddata", predictWebcam);
+
+    // Predict landmarks on each video frame
+    async function predictWebcam() {
+      if (handLandmarker && video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+
+        // Set canvas dimensions to match video
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        textCanvas.width = video.videoWidth;
+        textCanvas.height = video.videoHeight;
+
+        // Detect hand landmarks in the current video frame
+        const results = await handLandmarker.detectForVideo(video, performance.now());
+
+        // Clear previous drawings
+        canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+        textCtx.clearRect(0, 0, textCanvas.width, textCanvas.height);
+
+        // Draw detected landmarks and connections
+        if (results.landmarks) {
+          for (const landmarks of results.landmarks) {
+            // Dibujar las conexiones y landmarks normales
+            drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, { color: "#00FF00", lineWidth: 3 });
+            drawLandmarks(canvasCtx, landmarks, { color: "#FF0000", lineWidth: 2 });
+            
+            // Calcular todos los ángulos entre dedos
+            const allAnglesData = calculateAllFingerAngles(landmarks);
+            
+            // Detectar gesto de apuntar
+            const pointingGesture = detectPointingGesture(landmarks);
+            
+            // Mostrar todos los ángulos en la esquina superior izquierda (canvas sin voltear)
+            let yOffset = 10;
+            const lineHeight = 25;
+            const boxWidth = 300;
+            let boxHeight = Object.keys(allAnglesData.angles).length * lineHeight + 80; // Más espacio para el gesto
+            
+            // Fondo semitransparente
+            textCtx.fillStyle = "rgba(0, 0, 0, 0.8)";
+            textCtx.fillRect(10, yOffset, boxWidth, boxHeight);
+            
+            // Título
+            textCtx.fillStyle = "#FFFFFF";
+            textCtx.font = "bold 16px Arial";
+            textCtx.fillText("Ángulos entre dedos:", 20, yOffset + 25);
+            yOffset += 35;
+            
+            // Mostrar estado del gesto de apuntar
+            if (pointingGesture.isPointing) {
+              textCtx.fillStyle = "#00FF00";
+              textCtx.font = "bold 18px Arial";
+              textCtx.fillText("👉 APUNTANDO!", 20, yOffset);
+              textCtx.fillStyle = "#FFFF00";
+              textCtx.font = "12px Arial";
+              textCtx.fillText(`Dirección: ${pointingGesture.angle.toFixed(1)}°`, 20, yOffset + 18);
+            } else {
+              textCtx.fillStyle = "#888888";
+              textCtx.font = "14px Arial";
+              textCtx.fillText("No apuntando", 20, yOffset);
+            }
+            yOffset += 40;
+            
+            // Mostrar cada ángulo
+            textCtx.font = "14px Arial";
+            const angleLabels = {
+              'thumb_index': 'Pulgar ↔ Índice',
+              'index_middle': 'Índice ↔ Medio',
+              'middle_ring': 'Medio ↔ Anular',
+              'ring_pinky': 'Anular ↔ Meñique'
+            };
+            
+            for (const [angleKey, angle] of Object.entries(allAnglesData.angles)) {
+              const label = angleLabels[angleKey] || angleKey;
+              textCtx.fillStyle = "#00FF00";
+              textCtx.fillText(`${label}: ${angle.toFixed(1)}°`, 20, yOffset);
+              yOffset += lineHeight;
+            }
+            
+            // Visualizar las líneas entre todos los dedos
+            const canvasWidth = canvas.width;
+            const canvasHeight = canvas.height;
+            
+            // Convertir coordenadas normalizadas a coordenadas del canvas
+            const wristCanvas = {
+              x: allAnglesData.wrist.x * canvasWidth,
+              y: allAnglesData.wrist.y * canvasHeight
+            };
+            
+            const fingerCanvasPositions = {};
+            const fingerColors = {
+              thumb: "#FF00FF",   // Magenta
+              index: "#00FFFF",   // Cyan
+              middle: "#FFFF00",  // Amarillo
+              ring: "#FF8000",    // Naranja
+              pinky: "#8000FF"    // Violeta
+            };
+            
+            // Convertir posiciones de dedos a coordenadas del canvas
+            for (const [fingerName, fingerTip] of Object.entries(allAnglesData.fingerTips)) {
+              fingerCanvasPositions[fingerName] = {
+                x: fingerTip.x * canvasWidth,
+                y: fingerTip.y * canvasHeight
+              };
+            }
+            
+            // Dibujar líneas desde la muñeca hacia cada dedo
+            canvasCtx.lineWidth = 2;
+            for (const [fingerName, position] of Object.entries(fingerCanvasPositions)) {
+              canvasCtx.strokeStyle = fingerColors[fingerName];
+              canvasCtx.beginPath();
+              canvasCtx.moveTo(wristCanvas.x, wristCanvas.y);
+              canvasCtx.lineTo(position.x, position.y);
+              canvasCtx.stroke();
+            }
+            
+            // Destacar cada dedo con su color correspondiente
+            for (const [fingerName, position] of Object.entries(fingerCanvasPositions)) {
+              canvasCtx.fillStyle = fingerColors[fingerName];
+              canvasCtx.beginPath();
+              canvasCtx.arc(position.x, position.y, 8, 0, 2 * Math.PI);
+              canvasCtx.fill();
+              
+              // Agregar etiqueta del dedo
+              canvasCtx.fillStyle = "#FFFFFF";
+              canvasCtx.font = "12px Arial";
+              canvasCtx.fillText(fingerName.charAt(0).toUpperCase(), position.x + 12, position.y + 4);
+            }
+            
+            // Muñeca en blanco
+            canvasCtx.fillStyle = "#FFFFFF";
+            canvasCtx.beginPath();
+            canvasCtx.arc(wristCanvas.x, wristCanvas.y, 6, 0, 2 * Math.PI);
+            canvasCtx.fill();
+            
+            // Dibujar pequeña flecha en la punta del índice si se está apuntando
+            if (pointingGesture.isPointing) {
+              const indexPosition = fingerCanvasPositions.index;
+              
+              // Calcular el ángulo de la dirección de apuntado
+              const direction = {
+                x: pointingGesture.indexTip.x - pointingGesture.wrist.x,
+                y: pointingGesture.indexTip.y - pointingGesture.wrist.y
+              };
+              const angleRadians = Math.atan2(direction.y, direction.x);
+              
+              // Dibujar flecha pequeña en la punta del índice
+              drawSmallArrow(canvasCtx, indexPosition.x, indexPosition.y, angleRadians, "#FF0000", 40);
+              
+              // Agregar un segundo círculo pulsante para mayor visibilidad
+              canvasCtx.strokeStyle = "#FFFF00";
+              canvasCtx.lineWidth = 4;
+              canvasCtx.beginPath();
+              canvasCtx.arc(indexPosition.x, indexPosition.y, 15, 0, 2 * Math.PI);
+              canvasCtx.stroke();
+            }
+          }
+        } else {
+          // No se detectó mano, mostrar mensaje en la esquina superior izquierda
+          textCtx.fillStyle = "rgba(0, 0, 0, 0.8)";
+          textCtx.fillRect(10, 10, 300, 100);
+          
+          textCtx.fillStyle = "#FF0000";
+          textCtx.font = "bold 20px Arial";
+          textCtx.fillText("No hand detected", 20, 40);
+          
+          textCtx.fillStyle = "#FFFFFF";
+          textCtx.font = "14px Arial";
+          textCtx.fillText("Muestra tu mano al video", 20, 65);
+          textCtx.fillText("Apunta con el índice para ver flecha", 20, 85);
+        }
+      }
+      requestAnimationFrame(predictWebcam); // Continue detecting on the next frame
+    }
+  </script>
+</body>
+</html>
